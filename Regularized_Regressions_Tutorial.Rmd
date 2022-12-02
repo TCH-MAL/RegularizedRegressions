@@ -1,0 +1,1201 @@
+
+---
+title: "Regularized Regressions"
+author: 'Kristof Kipp & John Warmenhoven'
+output:
+  html_document:
+    theme: paper
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This is a tutorial about regularized regressions. We are using data from the original peer reviewed article "*Effect of Time after Anterior Cruciate Ligament Tears on Proprioception and Postural Stability*" which can be found here: https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0139038. 
+
+The part of the study focused on in this tutorial is the ability of different movement predictors to model  proprioception outcomes in the injured limb of 76 patients who have undergone ACL injury and surgery. These were a blend of patients with acute (time from injury < 3 months) and chronic (time from injury > 3 months) ACL tears. 
+
+A reproduction of passive positioning (RPP) using the Biodex multi-joint system 4 was used to measure the joint position sense of knee joint proprioception. A full description of the test is available in the manuscript, but briefly subjects were asked to push a switch when they thought that the angle of knee joint had reached a previous target angle (i.e. 45° of knee flexion as a starting point). The difference between the angle indicated by the patient and the target angle was recorded.
+
+The predictors consisted of variables such as age, height, weight, time interval after ACL injury (duration), maximal torque (60°/sec) of the quadriceps and hamstring on the involved (injured) and uninvolved sides of the body, as well as a ratio of their relative involvement (evaluated using an isokinetic testing device), postural stability indices measured using stabilometry and inclusive of anterior-posterior (APSI), medial-lateral (MLSI), and overall (OSI) (on both involved and uninvolved sides). Additionally, RPP of the uninvolved limb served as the final predictor. 
+
+## Introductory Steps
+
+### Loading libraries and data
+
+Let's start with loading some libraries that we will need to undertake this analysis. The main libraries required for undertaking analysis involving regularized regressions in this tutorial are `glmnet` and `caret`. 
+
+```{r, echo=T, warning=F, message=F}
+library(readxl)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(GGally)
+library(ggpubr)
+library(patchwork)
+library(caret)
+library(glmnet)
+library(knitr)
+```
+
+Now the first step is loading the dataset *S1_Dataset.xlsx*, which was made openly available at: https://doi.org/10.1371/journal.pone.0139038.s001. Even though this dataset is "ready to go" and has been uploaded as the raw data that was analysed, it is important to check the data prior to replicating any findings, or demonstrating any new methods. A first step in doing this is is checking things like the naming conventions or variables, the variable types (in terms of how they have been uploaded into R from Excel), and anything else from a "properties" perspective that may affect how R packages are able to read the data as a part of analysis. A nice quick way of summarizing the properties of the content within a data frame is by using the `summary()` function. 
+
+```{r, echo=T, warning=F, message=F}
+df <- read_excel("S1_Dataset.xlsx", sheet = "Sheet1")
+
+summary(df)
+```
+There are already a few things to take notice of here. A number of the variable names are in different languages (this itself is not a problem, but for ease of tracking it may be worth converting them to a universal language). There are also a few columns that have been imported as characters, where they may actually be numeric variables. But this will be hard to check until the naming conventions of variables have been standardized. 
+
+### Quick data preparation
+
+One of the things that a number of R packages don't appreciate is spaces within variable names, and sometimes certain symbols aren't read properly. To make it easier reading and tracking variables, we have used the `str_replace_all()` function to standardize all spaces and symbols to an underscore. We have also used the `names()` function check what the names now read as. 
+
+```{r, echo=T, warning=F, message=F}
+names(df) <- str_replace_all(names(df), c(" " = "_" , "," = "_" , "/" = "_")) 
+
+names(df)
+```
+
+We can also use the `dplyr` package function `rename` to change the name of the variables that are written in Korean. Similarly, we have changed variable names of variables that begin with numeric characters, because this can also be problematic when being read by R functions. 
+
+```{r, echo=T, warning=F, message=F}
+df <- df %>% 
+  dplyr::rename(
+    "ID" = "환자번호", 
+    "Gender" = "성별", 
+    "Height" = "키", 
+    "Weight" = "몸무게",
+    "Age" = "나이",
+    "Duration" = "검사기간",
+    "Q_torque_uninvolve" = "60BWEXuninvolved",
+    "Q_torque_involve" = "60BWEXinvolved",
+    "HS_torque_uninvolve" = "60BWFLuninvolved",
+    "HS_torque_involve" = "60BWFLinvolved"
+  )
+
+names(df)
+```
+
+Everything now looks a little bit more simpler from a "readability" perspective. So we are right to start some of the initial inspection of the data in terms of analysis. 
+
+Even though the original paper didn't use regularized regressions a nice starting point might be replicate what they did use initially. Initially, they used correlations as an input to selecting variables for an ordinary least squares regression. The results of these correlations provided in the paper are below.
+
+![*Correlation results for analysing all predictors relative to RPP on the injured side.*](Correlations.png)
+
+### Correlation checks
+
+Prior to running any form of initial analysis, it is important to check that all variables are correctly imported in terms of variable type. We have made one adjustment for `df$Age` which was imported as a character variable, and we have subsequently changed it to numeric.  
+
+To perform a replication of correlations, we first need to define the dataset to be explored. This new dataset (`reifined_dataset`) is based off the correlations calculated in the original paper. 
+
+```{r, echo=T, warning=F, message=F}
+df$Age <- as.numeric(df$Age)
+
+refined_dataset <- subset(df, select=c("Age", "Height", "Weight", "Duration", "Q_torque_uninvolve", "Q_torque_involve", "HS_torque_uninvolve", "HS_torque_involve", "ratio60uninvolved", "ratio60involved", "Over_invoved", "Over_univoved", "Ant_Post_invonved", "Ant_Post_uninvonved", "Med_Lat_involved", "Med_Lat_uninvolved", "RPPunabs", "RPP_inabs"))
+```
+
+Now we can look at creating individual scatter plot visualizations for each of these comparisons between the predictors and the RPP proprioceptive variable on the affected side of the body. This has been done using the `ggpubr` package to make the individual scatter plots, and the `patchwork` package to place the plots into a single graph. The raw code for this has been suppressed. 
+
+```{r, echo=F, warning=F, message=F, results='asis', fig.height=21, fig.width=16}
+a <- ggscatter(refined_dataset, x = "Age", y = "RPP_inabs",
+               xlab = "Age",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+b <- ggscatter(refined_dataset, x = "Height", y = "RPP_inabs",
+               xlab = "Height",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+c <- ggscatter(refined_dataset, x = "Weight", y = "RPP_inabs",
+               xlab = "Weight",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+d <- ggscatter(refined_dataset, x = "Duration", y = "RPP_inabs",
+               xlab = "Duration",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+e <- ggscatter(refined_dataset, x = "Q_torque_uninvolve", y = "RPP_inabs",
+               xlab = "Q Torque (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+f <- ggscatter(refined_dataset, x = "Q_torque_involve", y = "RPP_inabs",
+               xlab = "Q Torque (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+g <- ggscatter(refined_dataset, x = "HS_torque_uninvolve", y = "RPP_inabs",
+               xlab = "HS Torque (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+h <- ggscatter(refined_dataset, x = "HS_torque_involve", y = "RPP_inabs",
+               xlab = "HS Torque (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+i <- ggscatter(refined_dataset, x = "ratio60uninvolved", y = "RPP_inabs",
+               xlab = "HQ Ratio (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+j <- ggscatter(refined_dataset, x = "ratio60involved", y = "RPP_inabs",
+               xlab = "HQ Ratio (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+k <- ggscatter(refined_dataset, x = "Over_univoved", y = "RPP_inabs",
+               xlab = "OSI (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+l <- ggscatter(refined_dataset, x = "Over_invoved", y = "RPP_inabs",
+               xlab = "OSI (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+m <- ggscatter(refined_dataset, x = "Ant_Post_uninvonved", y = "RPP_inabs",
+               xlab = "APSI (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+n <- ggscatter(refined_dataset, x = "Ant_Post_invonved", y = "RPP_inabs",
+               xlab = "APSI (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+o <- ggscatter(refined_dataset, x = "Med_Lat_uninvolved", y = "RPP_inabs",
+               xlab = "MLSI (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+p <- ggscatter(refined_dataset, x = "Med_Lat_involved", y = "RPP_inabs",
+               xlab = "MLSI (involved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+q <- ggscatter(refined_dataset, x = "RPPunabs", y = "RPP_inabs",
+               xlab = "RPP absolute (uninvolved)",
+               ylab = "RPP (involved)",
+               add = "reg.line", 
+   add.params = list(color = "blue", fill = "lightgray"), 
+   conf.int = TRUE
+) + stat_cor(method = "pearson")
+
+layout <- "
+AABBCC
+DDEEFF
+GGHHII
+JJKKLL
+MMNNOO
+PPQQ##
+"
+
+a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + plot_layout(design = layout)
+```
+
+As a very quick observation, most of the correlations seem to replicate (relative to the table from the publication), but there are often rounding errors. It can be assumed that this is probably variables being uploaded to the open access dataset with different levels of decimal places. Additionally, there also appear to be some outliers present in the "duration" comparison. 
+
+There are also other useful functions from within the `GGally` package, that can be used for doing a quick inspection of variables that may be correlated with each other. Given that 5 predictors were selected from those correlations in the original paper, it may be useful to inspect whether these predictors were correlated with each other prior to entry into the ordinary least squares regression model (in the original paper). To do this we have made a new dataset for a more comprehensive inspection of these significant variables from the correlations. 
+
+```{r, echo=T, warning=F, message=F}
+significant_variables <- subset(df, select=c("Age", "Duration", "HS_torque_uninvolve", "HS_torque_involve", "RPP_inabs"))
+```
+
+We can first perform a quick graphical check of all variables with `ggpairs()`, as well as their associated correlations. Immediately it becomes apparent that the distribution for "duration" is not only substantially affected by outliers, but it is also very likely to be negatively skewed. 
+
+```{r, echo=T, warning=F, message=F, fig.height=8, fig.width=8}
+ggpairs <- ggpairs(significant_variables, title="Correlogram with ggpairs", 
+                   cardinality_threshold=NULL) # + theme_grey(base_size = 8)
+
+ggpairs
+```
+
+In addition to the information about the duration variable, we can immediately see that both hamstring variables carry a reasonable correlation with each other, knowing that both of these variables also had strong correlations with the outcome variable. We can also see correlations between age and proprioception (RPP) on the uninvolved side, as well duration (but we know from the original scatter plots that there may be some problems with duration in terms of outliers). 
+
+## Regression Models
+
+### Training and test data being defined.
+
+Before we start using any of the different types of regression models, we can specify training and test data sets. The training set is used to make the model, and the test set is used to externally test the model's predictive performance on unseen data. The test set is sometimes referred to as a validation set. We have done this here using the `createDataPartition()` function, specifying the proportion of training data as 0.7 (or 70% of all the data). 
+
+```{r, echo=T, warning=F, message=F}
+set.seed(123)
+training.samples <- refined_dataset$RPP_inabs %>%
+  createDataPartition(p = 0.7, list = FALSE)
+train.data  <- refined_dataset[training.samples, ]
+test.data <- refined_dataset[-training.samples, ]
+```
+
+We are then able to set up new matrices `x` as predictor variables, and `y` as the outcome variable. 
+
+```{r, echo=T, warning=F, message=F}
+x <- model.matrix(RPP_inabs~., train.data)[,-1]
+y <- train.data$RPP_inabs
+```
+
+### Ordinary Least Squares Regression 
+
+Before we do anything with training data, let's see if we can replicate the original results, where no partitioning of the data took place.
+
+```{r, echo=T, warning=F, message=F}
+lr = lm(RPP_inabs ~ Age + Duration + HS_torque_uninvolve + HS_torque_involve + RPPunabs, data = refined_dataset)
+summary(lr)
+```
+
+
+![*Multiple linear regression results modelling each of the correlated predictors with proprioception on the affeted side of the body*.](Regression.png)
+
+As we can see above, all of the p-values were replicated (give or take rounding errors). In the model trained on the whole dataset both duration and proprioception (RPP) for the uninvolved limb were noted as significantly contributing to the model (beta coefficients were less than 0.05). We can now undertake the same process on the training dataset.
+
+```{r, echo=T, warning=F, message=F}
+lr_tr = lm(RPP_inabs ~ Age + Duration + HS_torque_uninvolve + HS_torque_involve + RPPunabs, data = train.data)
+summary(lr_tr)
+```
+
+Interestingly, when the same analysis was repeated on the training dataset, treating this as a problem for assessing predictive performance, Hamstring torque on the involved side, age, and proprioception (RPP) on the uninvolved side were noted as being significant (p < 0.05). So duration was lost from the original model, which is interesting because a smaller, potentially noisier sample of data produced a larger number of contributive predictors. 
+
+#### Model performance
+
+We are now able to make an assessment on the performance of the model(s). When we do this later with the ridge, LASSO and elastic net regressions, we can draw on a number of inbuilt functions for evaluating model performance. For the OLS we have made our own function that produces standard measures of performance. The measures of model fit are the adjusted R-squared and the RMSE. The function can be seen below.
+
+```{r, echo=T, warning=F, message=F}
+eval_metrics = function(model, df, predictions, target){
+  resids = df[,target] - predictions
+  resids2 = resids**2
+  N = length(predictions)
+  r2 = as.character(round(summary(model)$r.squared, 2))
+  adj_r2 = as.character(round(summary(model)$adj.r.squared, 2))
+  print(adj_r2) # This is the adjusted R-squared!
+  print(as.character(round(sqrt(sum(resids2)/N), 2))) # This is RMSE!
+}
+```
+
+We can now use this function on the replicated model (this was all of the data, not just the training). We can do this by using the `predict()` function to create vector of predicted values for the entire dataset. Our own  `eval_metrics()` can then be used to report on the accuracy of the `lr` model (trained on all of the data). 
+
+```{r, echo=T, warning=F, message=F}
+predictions = predict(lr, newdata = refined_dataset)
+eval_metrics(lr, refined_dataset, predictions, target = 'RPP_inabs')
+```
+
+Next we can perform the same process, but only evaluating the model built on the training data. The assessment of accuracy via the adjusted R-squared and RMSE is then assessed relative to the test data, which has been held out. 
+
+```{r, echo=T, warning=F, message=F}
+predictions = predict(lr_tr, newdata = test.data)
+eval_metrics(lr_tr, test.data, predictions, target = 'RPP_inabs')
+```
+
+As we can see, the accuracy has dropped substantially for RMSE, from 7.21 to 5.81 from the assessments on the whole dataset compared to the test dataset.
+
+### Ridge Regression 
+
+Now we can move into applying the first of three different regularized regression models, being the ridge regression. Ridge regression shrinks the regression coefficients, so that variables, with minor contributions to the outcome variable, have their coefficients close to zero. The shrinkage of the coefficients is achieved by penalizing the regression model with a penalty term called L2-norm, which is the sum of the squared coefficients. The amount of the penalty can be fine-tuned using a constant called lambda (λ). Selecting a good value for λ is critical for improving model performance.
+
+When λ=0, the penalty term has no effect, and ridge regression will produce the classical least square coefficients. However, as λ increases to infinite, the impact of the shrinkage penalty grows, and the ridge regression coefficients become closer to zero.
+
+We’ll use the R function `glmnet()` (from the package of the same name) for computing regularized linear regression models. When using this function there are a number of inputs to consider:
+
+- **x**: matrix of predictor variables
+- **y**: the response or outcome variable, which is a binary variable.
+- **alpha**: the elastic net mixing parameter. Allowed values include:
+  - “1”: for lasso regression
+  - “0”: for ridge regression
+  - a value between 0 and 1 (say 0.3) for elastic net regression.
+- **lamba**: a numeric value defining the amount of shrinkage (we will cover how to select this in subsequent steps).
+
+To run a ridge regression and observe the outcomes, we can use function as follows (where alpha is set to 0 to denote a ridge regression, penalizing the L2-norm). 
+
+```{r, echo=T, warning=F, message=F, results='hide'}
+model <- glmnet(x, y, alpha = 0)
+```
+
+We can then display regression coefficients, via the `coef()` function.
+
+```{r, echo=T, warning=F, message=F, results='hide'}
+coef(model)
+```
+
+A summary of the glmnet path at each step is displayed if we just enter the object name or use the `print()` function.
+
+```{r, echo=T, warning=F, message=F, results='hide'}
+model_print <- print(model)
+```
+
+```{r, echo=T, warning=F, message=F}
+head(model_print)
+```
+
+This shows from left to right the number of nonzero coefficients `(Df)`, the percent (of null) deviance explained `(%dev)` and the value of λ (Lambda). Although glmnet fits the model for 100 values of lambda by default, it stops early if %dev does not change sufficiently from one lambda to the next (typically near the end of the path).
+
+We have not supplied any values for lambda here, although it is possible to provide a user supplied lambda sequence. Typical usage is to have the program compute its own lambda sequence based n-lambda (the number of lambda values, for which the default is 100) and lambda.min.ratio. This ratio is the smallest value for lambda, as a fraction of lambda.max, the (data derived) entry value (i.e. the smallest value for which all coefficients are zero). The default for this ratio depends on the sample size (n-obs) relative to the number of variables (n-vars). If n-obs > n-vars, the default is 0.0001, close to zero. If nobs < nvars, the default is 0.01. A very small value of lambda.min.ratio will lead to a saturated fit in the nobs < nvars case.
+
+In terms of settling on the "best" value of lambda for the final model, a process of cross-validation can be undertaken. `cv.glmnet` is the main function for performing cross-validation within `glmnet`, along with various supporting methods such as plotting and prediction.
+
+```{r, echo=T, warning=F, message=F}
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 0)
+```
+
+`cv.glmnet()` returns a cv.glmnet object, which is a list with all the ingredients of the cross-validated fit. It is now possible to plot the object `cv` via the `plot()` function. 
+
+This plots the cross-validation curve (red dotted line) along with upper and lower standard deviation curves along the λ sequence (error bars). Two special values along the λ sequence are indicated by the vertical dotted lines. `lambda.min` is the value of λ that gives minimum mean cross-validated error, while `lambda.1se` is the value of λ that gives the most regularized model such that the cross-validated error is within one standard error of the minimum.
+
+```{r, echo=T, warning=F, message=F}
+plot(cv)
+
+cv$lambda.min
+```
+
+It is also possible to do a trace plot to visualize how the coefficient estimates changed as a result of increasing lambda. 
+
+```{r, echo=T, warning=F, message=F}
+plot(model, xvar = "lambda", label = FALSE)
+```
+
+We can use the following code to get the value of `lambda.min` and the model coefficients at that value of λ. We provide this as the value of lambda for the final model and also display regression coefficients via `coef()`.
+
+```{r, echo=T, warning=F, message=F}
+ridge_model <- glmnet(x, y, alpha = 0, lambda = cv$lambda.min)
+
+coef(ridge_model)
+```
+
+We can now make make predictions on the test data, by setting up a model matrix for the test data (`x.test`) and making predictions on the test data via the `predict()` function. 
+
+```{r, echo=T, warning=F, message=F}
+x.test <- model.matrix(RPP_inabs ~., test.data)[,-1]
+predictions <- ridge_model %>% predict(x.test) %>% as.vector()
+```
+
+And finally we are able to model the performance metrics, RMSE and the adjusted R-squared (same metrics as those used for the OLS regression explored earlier).
+
+```{r, echo=T, warning=F, message=F}
+data.frame(
+  RMSE = RMSE(predictions, test.data$RPP_inabs),
+  Rsquare = R2(predictions, test.data$RPP_inabs)
+)
+```
+
+As we can see the RMSE is substantially lower than that reported on the test data set for the OLS model (5.92 for this ridge regression, compared to 7.21 for the OLS). 
+
+We can also test this predictive accuracy, building a model on the whole dataset and then refitting back on the whole dataset, to see if accuracy improves if no model validation is performed using a test set (we have suppressed the code, but this would involve running through each of the previous steps, but specifying the whole dataset as the training set).
+
+```{r, echo=F, warning=F, message=F}
+x <- model.matrix(RPP_inabs~., refined_dataset)[,-1]
+y <- refined_dataset$RPP_inabs
+
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 0)
+
+ridge_model <- glmnet(x, y, alpha = 0, lambda = cv$lambda.min)
+
+x.test <- model.matrix(RPP_inabs ~., refined_dataset)[,-1]
+predictions <- ridge_model %>% predict(x.test) %>% as.vector()
+
+data.frame(
+  RMSE = RMSE(predictions, refined_dataset$RPP_inabs),
+  Rsquare = R2(predictions, refined_dataset$RPP_inabs)
+)
+```
+
+Interestingly, when we include the additional data and aim to predict our original values from this mode the RMSE becomes worse!
+
+### LASSO Regression 
+
+Lasso stands for Least Absolute Shrinkage and Selection Operator (LASSO). It shrinks the regression coefficients toward zero by penalizing the regression model with a penalty term called L1-norm, which is the sum of the absolute coefficients. In the case of lasso regression, the penalty has the effect of forcing some of the coefficient estimates, with a minor contribution to the model, to be exactly equal to 0. This means that, lasso can be also seen as an alternative to the subset selection methods for performing variable selection in order to reduce the complexity of the model. 
+
+As in ridge regression, selecting a good value of λ for the lasso is critical. One obvious advantage of lasso regression over ridge regression, is that it produces simpler and more interpretable models that incorporate only a reduced set of the predictors. However, neither ridge regression nor the lasso will universally dominate the other.
+
+Generally, lasso might perform better in a situation where some of the predictors have large coefficients, and the remaining predictors have very small coefficients. Ridge regression will perform better when the outcome is a function of many predictors, all with coefficients of roughly equal size (James et al. 2013).
+
+Now that we have walked through the process of using the `glmnet()` to run a ridge regression, a LASSO regression will be very similar. Firstly we use the same `x` predictors and `y` outcome variable, and set alpha to 1. 
+
+```{r, echo=T, warning=F, message=F, results='hide'}
+model <- glmnet(x, y, alpha = 1)
+
+lasso_coef <- coef(model)
+```
+
+It is also possible to plot the model using the `plot()` function. Each curve corresponds to a variable. It shows the path of its coefficient against the ℓ1-norm of the whole coefficient vector as λ varies. The axis above indicates the number of nonzero coefficients at the current λ, which is the effective degrees of freedom (df) for the lasso.
+
+```{r, echo=T, warning=F, message=F}
+plot(model)
+```
+
+Similar to the ridge regression, we can also visualize how the coefficient estimates from the model changed as a result of increasing lambda. 
+
+```{r, echo=T, warning=F, message=F}
+plot(model, xvar = "lambda", label = FALSE)
+```
+
+We can again find the best lambda using cross-validation, and display that value as `cv$lambda.min`.
+
+```{r, echo=T, warning=F, message=F}
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 1)
+
+cv$lambda.min
+```
+
+Similar to the ridge regression, we can plot the cross-validation curve (red dotted line) along with upper and lower standard deviation curves along the λ sequence (error bars).
+
+```{r, echo=T, warning=F, message=F}
+plot(cv) 
+```
+
+Fit the final model on the training data using the value for `cv$lambda.min`, and display regression coefficients. 
+
+```{r, echo=T, warning=F, message=F}
+lasso_model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+
+coef(lasso_model)
+```
+
+And finally, we can make predictions on the test data, and model performance metrics identically to how we performed this for the ridge regression.
+
+```{r, echo=T, warning=F, message=F}
+x.test <- model.matrix(RPP_inabs ~., test.data)[,-1]
+predictions <- lasso_model %>% predict(x.test) %>% as.vector()
+
+data.frame(
+  RMSE = RMSE(predictions, test.data$RPP_inabs),
+  Rsquare = R2(predictions, test.data$RPP_inabs)
+)
+```
+
+Again RMSE is lower for the LASSO (5.87), which is a marginally better performance than the Ridge. We can do the same as we did for the ridge and make a quick comparison to building the model on the whole dataset, and re-fitting to the whole dataset, where again it can be seen that the model performed worse with all of the data as a training dataset. We can also see that four predictors were selected for this final model. 
+
+```{r, echo=F, warning=F, message=F}
+x <- model.matrix(RPP_inabs~., refined_dataset)[,-1]
+y <- refined_dataset$RPP_inabs
+
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 1)
+
+lasso_model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+
+x.test <- model.matrix(RPP_inabs ~., refined_dataset)[,-1]
+predictions <- lasso_model %>% predict(x.test) %>% as.vector()
+
+data.frame(
+  RMSE = RMSE(predictions, refined_dataset$RPP_inabs),
+  Rsquare = R2(predictions, refined_dataset$RPP_inabs)
+)
+```
+
+### Elastic Net Regression 
+
+Elastic Net produces a regression model that is penalized with both the L1-norm and L2-norm. The consequence of this is to effectively shrink coefficients (like in ridge regression) and to set some coefficients to zero (as in LASSO). Instead of using the `glmnet` package to perform this we are using the `caret` package. We can start by building the model using the training set using the `train()` function, and selecting the best tuning parameter `bestTune` from the model object that is created.
+
+In essence, this uses `caret` to automatically select the best tuning parameters for both alpha and lambda. The caret packages tests a range of possible alpha and lambda values, then selects the best values for lambda and alpha, resulting to a final model. In this example, we test the combination of 10 different values for alpha and lambda. This is specified using the option `tuneLength`.
+
+The best alpha and lambda values are those values that minimize the cross-validation error.
+
+```{r, echo=T, warning=F, message=F}
+set.seed(123)
+enet_model <- train(
+  RPP_inabs ~., data = train.data, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+
+enet_model$bestTune
+```
+
+We can then derive the coefficients of the final model, specifying the best lambda value, from within `enet_model$bestTune`. 
+
+```{r, echo=T, warning=F, message=F}
+coef(enet_model$finalModel, enet_model$bestTune$lambda)
+```
+
+And finally, we can make predictions on the test data, and model the performance metrics in the same way that we did for both the previous regressions. 
+
+```{r, echo=T, warning=F, message=F}
+x.test <- model.matrix(RPP_inabs ~., test.data)[,-1]
+predictions <- enet_model %>% predict(x.test)
+
+data.frame(
+  RMSE = RMSE(predictions, test.data$RPP_inabs),
+  Rsquare = R2(predictions, test.data$RPP_inabs)
+)
+```
+
+Again being able to check this relative to building a model on the whole dataset, and then testing on the same dataset, and this time it can be seen that we have found the lowest level of error so far (RMSE = 5.70).
+
+```{r, echo=F, warning=F, message=F}
+set.seed(123)
+enet_model <- train(
+  RPP_inabs ~., data = refined_dataset, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+
+x.test <- model.matrix(RPP_inabs ~., refined_dataset)[,-1]
+predictions <- enet_model %>% predict(x.test) %>% as.vector()
+
+data.frame(
+  RMSE = RMSE(predictions, refined_dataset$RPP_inabs),
+  Rsquare = R2(predictions, refined_dataset$RPP_inabs)
+)
+```
+
+### Nested cross-validation
+
+Outside of performing model validation using a test (validation set, or a "hold-out set"), there are other methods that can be used to validate the accuracy of a model. Leave one out cross-validation (LOOCV) can be used, which involves sequentially leaving one point out each time before re-fitting the model and measuring accuracy, and then averaging the error across each point as it is re-estimated. Similarly, k-fold cross validation (k-fold CV) divides the dataset into k- equally sized folds and tests the accuracy of a model fitted to n-1 folds on a single test fold iteratively, again averaging the error across folds at the end. These approaches are outlined in full (with associated software) in (James et al., 2013; chapter 5). 
+
+There are some packages available for performing nested cross-validation, which may be useful for the case of regularized regressions. The function `nestcv.glmnet()` from the `nestedcv` package enables nested cross-validation (CV) with glmnet, including tuning of elastic net alpha parameter and lambda on the inner CV loop. Predictions on the outer test folds (i.e. outer loop) are brought back together and error estimation/accuracy determined. The default is 10x10 nested CV. Below we have run this for the ridge regression on the whole dataset.
+
+```{r, echo=T, warning=F, message=F}
+library(nestedcv)
+
+x <- model.matrix(RPP_inabs~., refined_dataset)[,-1]
+y <- refined_dataset$RPP_inabs
+
+set.seed(123) 
+
+nestcv.glmnet(y = y, x = x, alphaSet = 0, n_outer_folds = 10, n_inner_folds = 10)
+```
+Then the LASSO regression. 
+
+```{r, echo=T, warning=F, message=F}
+library(nestedcv)
+
+x <- model.matrix(RPP_inabs~., refined_dataset)[,-1]
+y <- refined_dataset$RPP_inabs
+
+set.seed(123) 
+
+nestcv.glmnet(y = y, x = x, alphaSet = 1, n_outer_folds = 10, n_inner_folds = 10)
+```
+
+And finally, we can embed parameter tuning for alpha (i.e. similarly to how alpha is tuned within the elastic net), within the `nestcv.glmnet()` function. In the case below it is actually selecting the ridge model (i.e. alpha = 0) as the best fit as a part of the nested cross validation process.
+
+```{r, echo=T, warning=F, message=F}
+library(nestedcv)
+
+x <- model.matrix(RPP_inabs~., refined_dataset)[,-1]
+y <- refined_dataset$RPP_inabs
+
+set.seed(123) 
+
+nestcv.glmnet(y = y, x = x, n_outer_folds = 10, n_inner_folds = 10, alphaSet = seq(0, 1, 0.05))
+```
+
+## Some sense checking
+
+### Training and test dataset permutations
+
+We have already undertaken cross-validation (k-fold, 10 folds) for selection of lambda as a part of deriving the model for the ridge, lasso and elastic net regressions. And we have also walked through the integration being applied at both the parameter tuning and model prediction levels with nested CV. Walking through each of the options for performing no validation, holding our a test set, or performing some form of cross-validation, we received very variable error outcomes. 
+
+One way to visually inspect how unstable the structures are in a dataset can be to loop through different iterations of training and test data sets and visually inspect how unstable the behavior of model performance measures are when they are applied to the test dataset each time. We have done this for the ridge and LASSO models, across 500 random splits.
+
+This should result in 500 different variations of training and test data, and can serve as a useful descriptive exercise, for understanding whether the variability of error is large, and whether the data being analysed is likely to be stable enough to be 1) used as a predictive model and 2) divided into test and training sets.   
+
+```{r, echo=F, warning=F, message=F}
+
+###########################################################
+
+ridge_df <- setNames(data.frame(matrix(ncol = 2, nrow = 500)), c("RMSE", "Rsquare"))
+
+for (i in 1:500){
+  set.seed(i)
+  training.samples <- refined_dataset$RPP_inabs %>%
+    createDataPartition(p = 0.7, list = FALSE)
+  train.data  <- refined_dataset[training.samples, ]
+  test.data <- refined_dataset[-training.samples, ]
+  
+  # Predictor variables
+  x <- model.matrix(RPP_inabs~., train.data)[,-1]
+  # Outcome variable
+  y <- train.data$RPP_inabs
+  
+  # Find the best lambda using cross-validation
+  set.seed(123) 
+  cv <- cv.glmnet(x, y, alpha = 0)
+  # Display the best lambda value
+  cv$lambda.min
+  
+  # Fit the final model on the training data
+  model <- glmnet(x, y, alpha = 0, lambda = cv$lambda.min)
+  # Display regression coefficients
+  coef(model)
+  
+  # Make predictions on the test data
+  x.test <- model.matrix(RPP_inabs ~., test.data)[,-1]
+  predictions <- model %>% predict(x.test) %>% as.vector()
+  # Model performance metrics
+  ridge_df[i,] <- data.frame(
+    RMSE = RMSE(predictions, test.data$RPP_inabs),
+    Rsquare = R2(predictions, test.data$RPP_inabs)
+  )
+  
+}
+
+Ridge <- rep(c("Ridge"),500)
+Ridge <- cbind(ridge_df, Ridge)
+Ridge <- Ridge %>% 
+  dplyr::rename(
+    "Model" = "Ridge") 
+
+###########################################################
+
+lasso_df <- setNames(data.frame(matrix(ncol = 2, nrow = 500)), c("RMSE", "Rsquare"))
+
+for (i in 1:500){
+  set.seed(i)
+  training.samples <- refined_dataset$RPP_inabs %>%
+    createDataPartition(p = 0.7, list = FALSE)
+  train.data  <- refined_dataset[training.samples, ]
+  test.data <- refined_dataset[-training.samples, ]
+  
+  # Predictor variables
+  x <- model.matrix(RPP_inabs~., train.data)[,-1]
+  # Outcome variable
+  y <- train.data$RPP_inabs
+  
+  # Find the best lambda using cross-validation
+  set.seed(123) 
+  cv <- cv.glmnet(x, y, alpha = 1)
+  # Display the best lambda value
+  cv$lambda.min
+  
+  # Fit the final model on the training data
+  model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+  # Display regression coefficients
+  coef <- coef(model)
+  coef
+  
+  # Make predictions on the test data
+  x.test <- model.matrix(RPP_inabs ~., test.data)[,-1]
+  predictions <- model %>% predict(x.test) %>% as.vector()
+  # Model performance metrics
+  lasso_df[i,] <- data.frame(
+    RMSE = RMSE(predictions, test.data$RPP_inabs),
+    Rsquare = R2(predictions, test.data$RPP_inabs)
+  )
+  
+}
+
+LASSO <- rep(c("LASSO"),500)
+LASSO <- cbind(lasso_df, LASSO)
+LASSO <- LASSO %>% 
+  dplyr::rename(
+    "Model" = "LASSO") 
+
+###########################################################
+
+results_df <- rbind(Ridge, LASSO)
+Regression <- rep(c("Regression"),1000)
+results_df <- cbind(results_df, Regression)
+
+```
+
+And now we can visualize the results using a range of methods. For example, distributions of performance metrics across the 100 iterations can be visualized using `ggdensity()`. This can be done for both RMSE and R-squared values. 
+
+```{r, echo=F, warning=F, message=F}
+aa <- ggdensity(results_df, x = "RMSE", fill = "Model",
+          add = "mean", rug = FALSE,
+          ylab = "Density")
+
+bb <- ggdensity(results_df, x = "Rsquare", fill = "Model",
+          add = "mean", rug = FALSE,
+          ylab = "Density",
+          xlab = "R-Squared")
+
+layout <- "
+AAABBB
+AAABBB
+"
+
+aa + bb + plot_layout(design = layout)
+```
+
+As we can see above, R-squared values for both the ridge and LASSO models are quite low, with the LASSO being more concentrated towards demonstrating poorer estimations of fit relative to R-squared values. RMSE provides practically meaningful information on error levels, because it is expressed in the same units of measure as the original variable being predicted. 
+
+This way, judgement calls can be made on whether a predictive model that displays between 5 and 9 degrees of error for predicting proprioception outcomes for the injured limb should be used a a part of future practical work. Without being subject matter experts in the area of ACL proprioception, it is probably likely that these error levels are unusable for prediction. 
+
+We can also demonstrate this as a dotplot, with a banded confidence interval calculated using bootstrapping (confidence interval is plotted next to the dotplot for each of the models). 
+
+```{r, echo=F, warning=F, message=F, fig.height=8, fig.width=12}
+pd1 = position_dodge(0.2)
+pd2 = position_dodge(0.65)
+
+cc <- ggplot(results_df, aes(x = Regression, y = RMSE, fill = Model, color = Model))+
+  geom_dotplot(binaxis='y', stackdir='center',stackratio=1.2, 
+               dotsize=1.25, binwidth=0.02, position=pd2) +
+  stat_summary(fun.data=mean_cl_boot, position=pd1, geom="errorbar", width=0.05) +
+  stat_summary(fun.y=mean, position=pd1, geom="point", size=3) +
+  scale_fill_manual(values=hcl(c(15,195), 100, 60)) +
+  theme_bw()+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        panel.border = element_blank())
+
+dd <- ggplot(results_df, aes(x = Regression, y = Rsquare, fill = Model, color = Model))+
+  geom_dotplot(binaxis='y', stackdir='center',stackratio=1.2, 
+               dotsize=0.9, binwidth=0.002, position=pd2) +
+  labs(y = "R-Square") +
+  stat_summary(fun.data=mean_cl_boot, position=pd1, geom="errorbar", width=0.05) +
+  stat_summary(fun.y=mean, position=pd1, geom="point", size=3) +
+  scale_fill_manual(values=hcl(c(15,195), 100, 60)) +
+  theme_bw()+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        panel.border = element_blank())
+
+layout <- "
+AAABBB
+AAABBB
+"
+
+cc + dd + plot_layout(design = layout)
+```
+
+### Bootstrapping and exploring regression co-efficients
+
+We could have also looked at how the beta-coefficients of each of the new models being fitted were changing in the above example of permuting training and test data sets. Rather than do this, a more intuitive approach for exploring the variability of coefficients describing the model might be to look re-sampling from our original dataset. We can do these via a process of bootstrapping. We have run 200 resampled datasets using bootstrapping. 
+
+```{r, echo=T, warning=F, message=F}
+train.data <- refined_dataset
+x <- model.matrix(RPP_inabs~., train.data)[,-1]
+y <- train.data$RPP_inabs
+
+B <- 200
+N <- nrow(train.data)
+lasso_bootstrap_coef <- matrix(data = NA, nrow = B, ncol = ncol(x) + 1)
+set.seed(123)
+for(b in 1:B) {
+  bootstrap_inds <- sample(1:N, size = N, replace = TRUE)
+  bootstrap_dataset_x <- x[bootstrap_inds, ]
+  bootstrap_dataset_y <- y[bootstrap_inds]
+  bootstrap_cv <- cv.glmnet(x = bootstrap_dataset_x, y = bootstrap_dataset_y, alpha = 1)
+  bootstrap_fit <- glmnet(x = bootstrap_dataset_x, y = bootstrap_dataset_y, alpha = 1, lambda =  bootstrap_cv$lambda.min)
+  lasso_bootstrap_coef[b, ] <- coef(bootstrap_fit)[,1]
+  
+}
+
+lasso_bootstrap_coef <- as.data.frame(lasso_bootstrap_coef)
+lasso_bootstrap_coef <- setNames(lasso_bootstrap_coef, c("(Intercept)" ,
+                                                    "Age",
+                                                    "Height",
+                                                    "Weight",
+                                                    "Duration",
+                                                    "Q_torque_uninvolve",
+                                                    "Q_torque_involve",
+                                                    "HS_torque_uninvolve",
+                                                    "HS_torque_involve",
+                                                    "ratio60uninvolved",
+                                                    "ratio60involved",
+                                                    "Over_invoved",
+                                                    "Over_univoved",
+                                                    "Ant_Post_invonved",
+                                                    "Ant_Post_uninvonved",
+                                                    "Med_Lat_involved",
+                                                    "Med_Lat_uninvolved",
+                                                    "RPPunabs"))
+
+bootstrap_is_zero <- lasso_bootstrap_coef != 0 # TRUE false whether each 
+variable_inclusion <- as.data.frame(apply(X = bootstrap_is_zero, MARGIN = 2, FUN = mean))*100
+variable_inclusion <- variable_inclusion %>%
+  dplyr::rename(
+    "Percentage of Involvement" = "apply(X = bootstrap_is_zero, MARGIN = 2, FUN = mean)")
+kable(variable_inclusion)
+
+bootstrap_is_zero <- as.data.frame(bootstrap_is_zero)
+
+bootstrap_is_zero$Predictors = ifelse(bootstrap_is_zero$Age == TRUE &
+                                      bootstrap_is_zero$Duration == TRUE &
+                                      bootstrap_is_zero$HS_torque_involve == TRUE &
+                                      bootstrap_is_zero$RPPunabs == TRUE,
+                                      "YES", "NO")
+
+df1 <- bootstrap_is_zero[c("Predictors")]
+Predictors_Selected <- df1 %>%
+  dplyr::group_by(Predictors) %>% 
+  summarize(Percentage =  (n()/B)*100) %>%
+  dplyr::rename(
+    "Were the 4 original coefficients reselected?" = "Predictors")
+
+Predictors_Selected 
+
+bootstrap_is_zero$Set = ifelse(bootstrap_is_zero$Age == TRUE &
+                                      bootstrap_is_zero$Duration == TRUE &
+                                      bootstrap_is_zero$HS_torque_involve == TRUE &
+                                      bootstrap_is_zero$RPPunabs == TRUE &
+                                      bootstrap_is_zero$Height == FALSE &
+                                      bootstrap_is_zero$Weight == FALSE &
+                                      bootstrap_is_zero$Q_torque_uninvolve == FALSE &
+                                      bootstrap_is_zero$Q_torque_involve == FALSE &
+                                      bootstrap_is_zero$HS_torque_uninvolve == FALSE &
+                                      bootstrap_is_zero$ratio60uninvolved == FALSE &
+                                      bootstrap_is_zero$ratio60involved == FALSE &
+                                      bootstrap_is_zero$Over_invoved == FALSE &
+                                      bootstrap_is_zero$Over_univoved == FALSE &
+                                      bootstrap_is_zero$Ant_Post_invonved == FALSE &
+                                      bootstrap_is_zero$Ant_Post_invonved == FALSE &
+                                      bootstrap_is_zero$Med_Lat_involved == FALSE &
+                                      bootstrap_is_zero$Med_Lat_uninvolved == FALSE,
+                                      "YES", "NO")
+
+df2 <- bootstrap_is_zero[c("Set")]
+Set_Selected <- df2 %>%
+  dplyr::group_by(Set) %>% 
+  summarize(Percentage =  (n()/B)*100) %>%
+  dplyr::rename(
+    "Were all coefficients the same as the original model?" = "Set")
+  
+Set_Selected
+```                                       
+
+At the end of this loop after resampling new data 200 times, the code above has produced a few outputs. Firstly we can see the % of involvement for each predictor across the 200 iterations as a relative percentage. We can also see that the original four non-zero coefficients from the LASSO model on the whole dataset (age, duration, hamstring torque on the injured side and proprioception on the uninjured side) were included together in each iteration in 34.5% of the iterations. Additionally, the full set of included predictors, with all other variables being reduced to "0" coefficients occurred in less than 1% of the iterations. 
+
+We can also visualize the coefficients from these bootstrap resamples, and for ease of comparison we have run the same loop for the ridge regression and displayed coefficients for the ridge regression relative to the LASSO to show the way that ridge preserves non-zero coefficients. 
+
+The plot visualizes the results of the inclusion test (conducted above), where we can see many zero coefficients for the LASSO in red, and a more even distribution of the ridge. 
+
+```{r, echo=F, warning=F, message=F, results='hide', fig.height=8, fig.width=12}
+train.data <- refined_dataset
+x <- model.matrix(RPP_inabs~., train.data)[,-1]
+y <- train.data$RPP_inabs
+
+B <- 200
+N <- nrow(train.data)
+ridge_bootstrap_coef <- matrix(data = NA, nrow = B, ncol = ncol(x) + 1)
+set.seed(123)
+for(b in 1:B) {
+  bootstrap_inds <- sample(1:N, size = N, replace = TRUE)
+  bootstrap_dataset_x <- x[bootstrap_inds, ]
+  bootstrap_dataset_y <- y[bootstrap_inds]
+  bootstrap_cv <- cv.glmnet(x = bootstrap_dataset_x, y = bootstrap_dataset_y, alpha = 0)
+  bootstrap_fit <- glmnet(x = bootstrap_dataset_x, y = bootstrap_dataset_y, alpha = 0, lambda =        bootstrap_cv$lambda.min)
+  ridge_bootstrap_coef[b, ] <- coef(bootstrap_fit)[,1]
+  
+}
+
+ridge_bootstrap_coef <- as.data.frame(ridge_bootstrap_coef)
+ridge_bootstrap_coef <- setNames(ridge_bootstrap_coef, c("(Intercept)" ,
+                                                                    "Age",
+                                                                    "Height",
+                                                                    "Weight",
+                                                                    "Duration",
+                                                                    "Q_torque_uninvolve",
+                                                                    "Q_torque_involve",
+                                                                    "HS_torque_uninvolve",
+                                                                    "HS_torque_involve",
+                                                                    "ratio60uninvolved",
+                                                                    "ratio60involved",
+                                                                    "Over_invoved",
+                                                                    "Over_univoved",
+                                                                    "Ant_Post_invonved",
+                                                                    "Ant_Post_uninvonved",
+                                                                    "Med_Lat_involved",
+                                                                    "Med_Lat_uninvolved",
+                                                                    "RPPunabs"))
+
+LASSO_coef <- rep(c("LASSO"),200)
+LASSO_coef <- cbind(lasso_bootstrap_coef, LASSO_coef)
+LASSO_coef <- LASSO_coef %>% 
+  dplyr::rename(
+    "Model" = "LASSO_coef") 
+
+Ridge_coef <- rep(c("Ridge"),200)
+Ridge_coef <- cbind(ridge_bootstrap_coef, Ridge_coef)
+Ridge_coef <- Ridge_coef %>% 
+  dplyr::rename(
+    "Model" = "Ridge_coef") 
+
+lasso_coef_long <- gather(LASSO_coef[,-1], Predictor, Beta, Age:RPPunabs, factor_key=TRUE)
+ridge_coef_long <- gather(Ridge_coef[,-1], Predictor, Beta, Age:RPPunabs, factor_key=TRUE)
+
+#### Together for graphs
+
+coef_long_bootstrap <- rbind(lasso_coef_long, ridge_coef_long)
+
+ggplot(coef_long_bootstrap, aes(x = Predictor, y = Beta, fill = Model, color = Model))+
+  geom_dotplot(binaxis='y', stackdir='center',stackratio=1.2, 
+               dotsize=1, binwidth=0.2, position=pd2) +
+  labs(x = "", y = "Beta") +
+  scale_fill_manual(values=hcl(c(15,195), 100, 60)) +
+  theme_bw()+
+  theme(panel.border = element_blank(),
+        axis.text.x = element_text(angle = 15, vjust = 0.5, hjust=1)) + 
+  scale_x_discrete(labels = c('Age', 'Height', 'Weight', 'Duration',
+                              'Q Torque (Uninvolved)', 'Q Torque (Involved)', 'H Torque (Uninvolved)', 'H Torque (Involved)',
+                              'HQ Ratio (Uninvolved)', 'HQ Ratio (Involved)', 'OSI (Uninvolved)', 'OSI (Involved)',
+                              'APSI (Uninvolved)', 'APSI (Involved)', 'MLSI (Uninvolved)', 'MLSI (Involved)',
+                              'RPP (Uninvolved)'))
+
+```                       
+
+### Simulating new outcomes from the original model
+
+We can also take the "true" model (original model from all of the data captured) and hold the coefficients from this model as the basis from which we would like simulated "outcome" data to match the selected coefficients from our original model. We can generate a set of simulated outcomes (`y`) from the standard deviation of the mean-squared error (MSE) of the true model, then refit a LASSO procedure to these simulated outcomes and make an assessment of whether LASSO selects the same predictors as non-zero coefficients as were selecting in the true model. 
+
+For this dataset, we have used the whole dataset rather than splitting it into training and testing splits. 
+
+```{r, echo=T, warning=F, message=F}
+train.data <- refined_dataset
+x <- model.matrix(RPP_inabs~., train.data)[,-1]
+y <- train.data$RPP_inabs
+
+# fit model to get parameter estimates
+cv <- cv.glmnet(x = x, y = y, alpha = 1)
+fit <- glmnet(x = x, y =y, alpha = 1, lambda = cv$lambda.min)
+# use these to construct structure for simulated model
+beta <- coef(fit) # detract coefficients and use them as truth
+
+B <- 200
+N <- nrow(train.data)
+lasso_refit_coef <- matrix(data = NA, nrow = B, ncol = ncol(x) + 1)
+X <- cbind(1, x) # design matrix (columns of 1s for intercept)
+linear_predictor <- X %*% beta # linear predictor (fixed effects bit)
+# get square root of error variance
+sigma <- sqrt(deviance(fit) / (N-1)) # or sd(y - predict(fit, newx = x))
+N <- nrow(x)
+set.seed(123)
+for(b in 1:B) {
+# create simulated data set by sampling from errors
+epsilon <- rnorm(n = N, mean = 0, sd = sigma)
+y_sim <- linear_predictor + epsilon # y = beta * x + epsilon 
+# now fit on simulated data
+cv_sim <- cv.glmnet(x = x, y = y_sim, alpha = 1)
+fit_sim <- glmnet(x = x, y = y_sim, alpha = 1, lambda = cv_sim$lambda.min)
+lasso_refit_coef[b, ] <- coef(fit_sim)[,1]
+}
+
+lasso_refit_coef <- as.data.frame(lasso_refit_coef)
+lasso_refit_coef <- setNames(lasso_refit_coef, c("(Intercept)" ,
+                                                    "Age",
+                                                    "Height",
+                                                    "Weight",
+                                                    "Duration",
+                                                    "Q_torque_uninvolve",
+                                                    "Q_torque_involve",
+                                                    "HS_torque_uninvolve",
+                                                    "HS_torque_involve",
+                                                    "ratio60uninvolved",
+                                                    "ratio60involved",
+                                                    "Over_invoved",
+                                                    "Over_univoved",
+                                                    "Ant_Post_invonved",
+                                                    "Ant_Post_uninvonved",
+                                                    "Med_Lat_involved",
+                                                    "Med_Lat_uninvolved",
+                                                    "RPPunabs"))
+
+bootstrap_is_zero <- lasso_refit_coef != 0 # TRUE/FALSE in terms of whether they are zero 
+variable_inclusion <- as.data.frame(apply(X = bootstrap_is_zero, MARGIN = 2, FUN = mean))*100
+variable_inclusion <- variable_inclusion %>%
+  dplyr::rename(
+    "Percentage of Involvement" = "apply(X = bootstrap_is_zero, MARGIN = 2, FUN = mean)")
+kable(variable_inclusion)
+
+bootstrap_is_zero <- as.data.frame(bootstrap_is_zero)
+
+bootstrap_is_zero$Predictors = ifelse(bootstrap_is_zero$Age == TRUE &
+                                      bootstrap_is_zero$Duration == TRUE &
+                                      bootstrap_is_zero$HS_torque_involve == TRUE &
+                                      bootstrap_is_zero$RPPunabs == TRUE,
+                                      "YES", "NO")
+
+df1 <- bootstrap_is_zero[c("Predictors")]
+Predictors_Selected <- df1 %>%
+  dplyr::group_by(Predictors) %>% 
+  summarize(Percentage =  (n()/B)*100) %>%
+  dplyr::rename(
+    "Were the 4 original coefficients reselected?" = "Predictors")
+
+Predictors_Selected 
+
+bootstrap_is_zero$Set = ifelse(bootstrap_is_zero$Age == TRUE &
+                                      bootstrap_is_zero$Duration == TRUE &
+                                      bootstrap_is_zero$HS_torque_involve == TRUE &
+                                      bootstrap_is_zero$RPPunabs == TRUE &
+                                      bootstrap_is_zero$Height == FALSE &
+                                      bootstrap_is_zero$Weight == FALSE &
+                                      bootstrap_is_zero$Q_torque_uninvolve == FALSE &
+                                      bootstrap_is_zero$Q_torque_involve == FALSE &
+                                      bootstrap_is_zero$HS_torque_uninvolve == FALSE &
+                                      bootstrap_is_zero$ratio60uninvolved == FALSE &
+                                      bootstrap_is_zero$ratio60involved == FALSE &
+                                      bootstrap_is_zero$Over_invoved == FALSE &
+                                      bootstrap_is_zero$Over_univoved == FALSE &
+                                      bootstrap_is_zero$Ant_Post_invonved == FALSE &
+                                      bootstrap_is_zero$Ant_Post_invonved == FALSE &
+                                      bootstrap_is_zero$Med_Lat_involved == FALSE &
+                                      bootstrap_is_zero$Med_Lat_uninvolved == FALSE,
+                                      "YES", "NO")
+
+df2 <- bootstrap_is_zero[c("Set")]
+Set_Selected <- df2 %>%
+  dplyr::group_by(Set) %>% 
+  summarize(Percentage =  (n()/B)*100) %>%
+  dplyr::rename(
+    "Were all coefficients the same as the original model?" = "Set")
+  
+Set_Selected
+```   
+
+At the end of this loop after simulating outcome data 200 times, the code above has produced a few outputs. Firstly we can see the % of involvement for each predictor across the 200 iterations as a relative percentage. We can also see that the original four coefficients from the LASSO model on the whole dataset (age, duration, hamstring torque on the injured side and proprioception on the uninjured side) were included together in each iteration in 28% of the iterations. Additionally, the full set of included predictors, with all other variables being reduced to "0" coefficients did not occur once across the iterations. So the same model characteristics were never selected for new outcome data simulated from the original model. 
+
+We can also visualize the coefficients from these model re-fits, and for ease of comparison we have run the same loop for the ridge regression and displayed coefficients for the ridge regression relative to the LASSO to show the way that ridge preserves non-zero coefficients. 
+
+The plot visualizes the results of the inclusion test (conducted above), where we can see many 0 coefficients for the LASSO in red, and a more even distribution of the ridge. 
+
+```{r, echo=F, warning=F, message=F, results='hide', fig.height=8, fig.width=12}
+B <- 200
+N <- nrow(train.data)
+ridge_refit_coef <- matrix(data = NA, nrow = B, ncol = ncol(x) + 1)
+X <- cbind(1, x) # design matrix (columns of 1s for intercept)
+linear_predictor <- X %*% beta # linear predictor (fixed effects bit)
+# get square root of error variance
+sigma <- sqrt(deviance(fit) / (N-1)) # or sd(y - predict(fit, newx = x))
+N <- nrow(x)
+set.seed(123)
+for(b in 1:B) {
+# create simulated data set by sampling from errors
+epsilon <- rnorm(n = N, mean = 0, sd = sigma)
+y_sim <- linear_predictor + epsilon # y = beta * x + epsilon 
+# now fit on simulated data
+cv_sim <- cv.glmnet(x = x, y = y_sim, alpha = 0)
+fit_sim <- glmnet(x = x, y = y_sim, alpha = 0, lambda = cv_sim$lambda.min)
+ridge_refit_coef[b, ] <- coef(fit_sim)[,1]
+}
+
+ridge_refit_coef <- as.data.frame(ridge_refit_coef)
+ridge_refit_coef <- setNames(ridge_refit_coef, c("(Intercept)" ,
+                                                                    "Age",
+                                                                    "Height",
+                                                                    "Weight",
+                                                                    "Duration",
+                                                                    "Q_torque_uninvolve",
+                                                                    "Q_torque_involve",
+                                                                    "HS_torque_uninvolve",
+                                                                    "HS_torque_involve",
+                                                                    "ratio60uninvolved",
+                                                                    "ratio60involved",
+                                                                    "Over_invoved",
+                                                                    "Over_univoved",
+                                                                    "Ant_Post_invonved",
+                                                                    "Ant_Post_uninvonved",
+                                                                    "Med_Lat_involved",
+                                                                    "Med_Lat_uninvolved",
+                                                                    "RPPunabs"))
+
+LASSO_refit_coef <- rep(c("LASSO"),100)
+LASSO_refit_coef <- as.data.frame(cbind(lasso_refit_coef, LASSO_refit_coef))
+LASSO_refit_coef <- LASSO_refit_coef %>% 
+  dplyr::rename(
+    "Model" = "LASSO_refit_coef") 
+
+Ridge_refit_coef <- rep(c("Ridge"),100)
+Ridge_refit_coef <- as.data.frame(cbind(ridge_refit_coef, Ridge_refit_coef))
+Ridge_refit_coef <- Ridge_refit_coef %>% 
+  dplyr::rename(
+    "Model" = "Ridge_refit_coef") 
+
+lasso_refit_long <- gather(LASSO_refit_coef[,-1], Predictor, Beta, Age:RPPunabs, factor_key=TRUE)
+ridge_coef_long <- gather(Ridge_refit_coef[,-1], Predictor, Beta, Age:RPPunabs, factor_key=TRUE)
+
+#### Together for graphs
+
+refit_long_bootstrap <- rbind(lasso_refit_long, ridge_coef_long)
+
+ggplot(refit_long_bootstrap, aes(x = Predictor, y = Beta, fill = Model, color = Model))+
+  geom_dotplot(binaxis='y', stackdir='center',stackratio=1.2, 
+               dotsize=1, binwidth=0.05, position=pd2) +
+  labs(x = "", y = "Beta") +
+  scale_fill_manual(values=hcl(c(15,195), 100, 60)) +
+  theme_bw()+
+  theme(panel.border = element_blank(),
+        axis.text.x = element_text(angle = 15, vjust = 0.5, hjust=1)) + 
+  scale_x_discrete(labels = c('Age', 'Height', 'Weight', 'Duration',
+                              'Q Torque (Uninvolved)', 'Q Torque (Involved)', 'H Torque (Uninvolved)', 'H Torque (Involved)',
+                              'HQ Ratio (Uninvolved)', 'HQ Ratio (Involved)', 'OSI (Uninvolved)', 'OSI (Involved)',
+                              'APSI (Uninvolved)', 'APSI (Involved)', 'MLSI (Uninvolved)', 'MLSI (Involved)',
+                              'RPP (Uninvolved)'))
+
+```                       
+
+From the re-fitting, like the bootstrapped data, it can be seen some of the variables on the left hand side of the plot have fairly consistent coefficients, but some of them seem quite small and hard to inspect given the scale of the graph being expanded by variables towards the right side of the graph. It might help to zoom in on the first four coefficients to inspect them on a reduced y-axis scale. 
+
+```{r, echo=F, warning=F, message=F, fig.height=8, fig.width=12}
+subset <- subset(refit_long_bootstrap, (Predictor=="Age"| Predictor=="Height"| Predictor=="Weight"| Predictor=="Duration"))
+
+ggplot(subset, aes(x = Predictor, y = Beta, fill = Model, color = Model))+
+  geom_dotplot(binaxis='y', stackdir='center',stackratio=1.2, 
+               dotsize=0.7, binwidth=0.002, position=pd2) +
+  labs(y = "Beta") +
+  scale_fill_manual(values=hcl(c(15,195), 100, 60)) +
+  theme_bw()+
+  theme(panel.border = element_blank(),
+        axis.text.x = element_text(angle = 15, vjust = 0.5, hjust=1))
+```
+
+These results confirm the variability demonstrated in how frequently some of these variables were selected within regression models, but also highlight the spread of predictor involvement, with there being a substantial amount of variability for the size of regression coefficients across these permutations.  
+
+## References
+
+1. Chatterjee A, Lahiri SN. 2011. Bootstrapping lasso estimators. Journal of the American Statistical Association, 106(494), 608-625. 
+2. James G, Witten D, Hastie T, Tibshirani R. 2013. An introduction to statistical learning (Vol. 112, p. 18). New York: springer.
+3. Lee DH, Lee JH, Ahn SE, Park MJ. 2015. Effect of time after anterior cruciate ligament tears on proprioception and postural stability. PloS one, 10(9), e0139038. 
